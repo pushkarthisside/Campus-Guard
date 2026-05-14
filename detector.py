@@ -1,405 +1,89 @@
-from zones import get_zone_for_bbox, draw_zones
 import cv2
 import numpy as np
 import time
 from ultralytics import YOLO
-import mediapipe as mp
+from deep_sort_realtime.deepsort_tracker import DeepSort
 
-# THIS IS THE FIX: Bypass the .solutions attribute entirely
+# DIRECT IMPORT FIX: Bypass the .solutions attribute error
 try:
     import mediapipe.python.solutions.pose as mp_pose
 except Exception:
     mp_pose = None
+    print("[SYSTEM] MediaPipe Direct Import Failed")
 
-from deep_sort_realtime.deepsort_tracker import DeepSort
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LOAD MODELS
-# ─────────────────────────────────────────────────────────────────────────────
-
+# 1. Faster Model: yolov8n is roughly 3x faster than yolov8s
 yolo_model = YOLO("yolov8n.pt")
 
-# Optional weapon model
-# weapon_model = YOLO("models/weapon_model.pt")
+# Tracker setup: shorter max_age for quicker cleanup
+tracker = DeepSort(max_age=15, n_init=2)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MEDIAPIPE POSE
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Pose Engine Setup
 pose_engine = None
-if mp_pose is not None:
-    try:
-        pose_engine = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-    except Exception:
-        pose_engine = None
+if mp_pose:
+    pose_engine = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=0, # 0 is optimized for speed
+        min_detection_confidence=0.5
+    )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DEEPSORT TRACKER
-# ─────────────────────────────────────────────────────────────────────────────
-
-tracker = DeepSort(
-    max_age=30,
-    n_init=2
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL STATE
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Persistent State
 prev_positions = {}
-risk_history = {}
-
-HISTORY_LEN = 10
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RISK HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def score_to_color(score):
-    if score >= 66:
-        return (0, 34, 255)      # RED
-    elif score >= 36:
-        return (0, 204, 255)     # YELLOW
-    else:
-        return (0, 255, 136)     # GREEN
-
-
-def score_to_label(score):
-    if score >= 66:
-        return "HIGH RISK"
-    elif score >= 36:
-        return "POTENTIAL RISK"
-    else:
-        return "SAFE"
-
-
-def smooth_score(track_id, raw_score):
-    if track_id not in risk_history:
-        risk_history[track_id] = []
-
-    risk_history[track_id].append(raw_score)
-
-    if len(risk_history[track_id]) > HISTORY_LEN:
-        risk_history[track_id].pop(0)
-
-    return int(np.mean(risk_history[track_id]))
-
-# ─────────────────────────────────────────────────────────────────────────────
-# POSE EXTRACTION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_pose_for_person(frame, x1, y1, x2, y2):
-    h, w = frame.shape[:2]
-
-    x1 = max(0, int(x1))
-    y1 = max(0, int(y1))
-    x2 = min(w, int(x2))
-    y2 = min(h, int(y2))
-
-    crop = frame[y1:y2, x1:x2]
-
-    if crop.size == 0 or pose_engine is None:
-        return None
-
-    try:
-        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        result = pose_engine.process(crop_rgb)
-        return result.pose_landmarks
-    except:
-        return None
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OPTIONAL WEAPON PLACEHOLDER
-# ─────────────────────────────────────────────────────────────────────────────
-
-def check_for_weapons(frame, bbox):
-    """
-    Placeholder weapon logic.
-    Integrate actual model later.
-    """
-    return False
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RISK COMPUTATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_risk(track_id, bbox, all_bboxes, pose_landmarks, frame_shape, update_pos=True):
-
-    score = 0
-
-    x1, y1, x2, y2 = bbox
-
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-
-    box_w = x2 - x1
-    box_h = y2 - y1
-
-    # ────────────────────────────────────────────────────────────────────────
-    # MOVEMENT DETECTION
-    # ────────────────────────────────────────────────────────────────────────
-
-    displacement = 0
-
-    if track_id in prev_positions:
-
-        px, py = prev_positions[track_id]
-
-        displacement = np.sqrt((cx - px) ** 2 + (cy - py) ** 2)
-
-        if displacement > 3:
-            score += 10
-
-        if displacement > 15:
-            score += 20
-
-    if update_pos:
-        prev_positions[track_id] = (cx, cy)
-
-    # ────────────────────────────────────────────────────────────────────────
-    # PROXIMITY DETECTION
-    # ────────────────────────────────────────────────────────────────────────
-
-    for other_bbox in all_bboxes:
-
-        ox1, oy1, ox2, oy2 = other_bbox
-
-        ocx = (ox1 + ox2) / 2
-        ocy = (oy1 + oy2) / 2
-
-        dist = np.sqrt((cx - ocx) ** 2 + (cy - ocy) ** 2)
-
-        if 5 < dist < box_w * 1.5:
-            score += 30
-            break
-
-    # ────────────────────────────────────────────────────────────────────────
-    # AGGRESSIVE POSE DETECTION
-    # ────────────────────────────────────────────────────────────────────────
-
-    if pose_landmarks:
-
-        try:
-            lm = pose_landmarks.landmark
-
-            left_wrist  = lm[mp_pose.PoseLandmark.LEFT_WRIST]
-            right_wrist = lm[mp_pose.PoseLandmark.RIGHT_WRIST]
-
-            left_shoulder  = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
-            right_shoulder = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-
-            nose = lm[mp_pose.PoseLandmark.NOSE]
-
-            left_arm_raised  = left_wrist.y  < left_shoulder.y
-            right_arm_raised = right_wrist.y < right_shoulder.y
-
-            if left_arm_raised or right_arm_raised:
-                score += 40
-
-            avg_shoulder_y = (left_shoulder.y + right_shoulder.y) / 2
-
-            if nose.y > avg_shoulder_y + 0.1:
-                score += 15
-
-        except:
-            pass
-
-    # ────────────────────────────────────────────────────────────────────────
-    # FALLEN PERSON DETECTION
-    # ────────────────────────────────────────────────────────────────────────
-
-    aspect_ratio = box_w / (box_h + 1e-5)
-
-    if aspect_ratio > 1.6:
-        score += 60
-
-    return min(score, 100)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN FRAME PROCESSOR
-# ─────────────────────────────────────────────────────────────────────────────
+fast_move_counter = {}
 
 def process_frame(frame):
-
-    # ────────────────────────────────────────────────────────────────────────
-    # YOLO DETECTION
-    # ────────────────────────────────────────────────────────────────────────
-
-    results = yolo_model(
-        frame,
-        classes=[0],
-        verbose=False
-    )[0]
-
+    # YOLO Detection
+    results = yolo_model(frame, classes=[0], conf=0.5, verbose=False)[0]
     raw_detections = []
 
     for box in results.boxes:
-
         x1, y1, x2, y2 = box.xyxy[0].tolist()
-
         conf = float(box.conf[0])
+        raw_detections.append(([x1, y1, x2-x1, y2-y1], conf, "person"))
 
-        if conf < 0.4:
-            continue
-
-        raw_detections.append(
-            (
-                [x1, y1, x2 - x1, y2 - y1],
-                conf,
-                "person"
-            )
-        )
-
-    # ────────────────────────────────────────────────────────────────────────
-    # TRACKING
-    # ────────────────────────────────────────────────────────────────────────
-
-    tracks = tracker.update_tracks(
-        raw_detections,
-        frame=frame
-    )
-
-    confirmed_bboxes = []
-
-    for track in tracks:
-
-        if not track.is_confirmed():
-            continue
-
-        x1, y1, x2, y2 = track.to_ltrb()
-
-        confirmed_bboxes.append(
-            [x1, y1, x2, y2]
-        )
-
+    # Tracking
+    tracks = tracker.update_tracks(raw_detections, frame=frame)
     detections_info = []
-    frame = draw_zones(frame)
-
-    any_red = False
-
-    # ────────────────────────────────────────────────────────────────────────
-    # PROCESS EACH TRACK
-    # ────────────────────────────────────────────────────────────────────────
 
     for track in tracks:
-
         if not track.is_confirmed():
             continue
-
+        
         track_id = track.track_id
+        x1, y1, x2, y2 = map(int, track.to_ltrb())
+        
+        # Movement Score with fast-move counter
+        score = 20
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
 
-        x1, y1, x2, y2 = track.to_ltrb()
-        zone_name = get_zone_for_bbox(x1, y1, x2, y2)
+        if track_id in prev_positions:
+            dist = np.hypot(cx - prev_positions[track_id][0], cy - prev_positions[track_id][1])
+            if dist > 20:
+                fast_move_counter[track_id] = fast_move_counter.get(track_id, 0) + 1
+            else:
+                fast_move_counter[track_id] = 0  # reset if not fast
 
-        base_score = compute_risk(
-            track_id,
-            [x1, y1, x2, y2],
-            confirmed_bboxes,
-            None,
-            frame.shape,
-            update_pos=False
-        )
+            # Only score high if fast for 3+ consecutive frames
+            if fast_move_counter.get(track_id, 0) >= 3:
+                score += 40
+            elif dist > 8:
+                score += 15
 
-        pose_lm = None
-        if base_score >= 15:
-            pose_lm = get_pose_for_person(frame, x1, y1, x2, y2)
+        prev_positions[track_id] = (cx, cy)
 
-        is_weapon = check_for_weapons(frame, [x1, y1, x2, y2])
-
-        raw_score = compute_risk(
-            track_id,
-            [x1, y1, x2, y2],
-            confirmed_bboxes,
-            pose_lm,
-            frame.shape,
-            update_pos=True
-        )
-
-        if is_weapon:
-            raw_score += 50
-
-        raw_score = min(raw_score, 100)
-
-        score = smooth_score(track_id, raw_score)
-
-        color = score_to_color(score)
-        label = score_to_label(score)
-
-        if score >= 66:
-            any_red = True
-
-        cv2.rectangle(
-            frame,
-            (int(x1), int(y1)),
-            (int(x2), int(y2)),
-            color,
-            2
-        )
-
-        tag   = f"ID{track_id} | {score}% | {label}"
-        tag_y = max(int(y1) - 10, 20)
-
-        cv2.putText(
-            frame,
-            tag,
-            (int(x1), tag_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            color,
-            2
-        )
+        # Drawing (No Zones)
+        color = (0, 255, 0) if score < 75 else (0, 0, 255)
+        label = "SAFE" if score < 75 else "HIGH RISK"
+        
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame, f"ID:{track_id} {score}% {label}", (x1, y1-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
         detections_info.append({
-            "track_id": int(track_id),
-            "zone":     zone_name,
-            "score":    score,
-            "label":    label,
-            "bbox":     [int(x1), int(y1), int(x2), int(y2)]
+            "track_id": track_id,
+            "score": score,
+            "threat": "Movement Detected" if score > 30 else "Normal",
+            "zone": "Floor", # Simplified
+            "bbox": [x1, y1, x2, y2]
         })
 
-    # ────────────────────────────────────────────────────────────────────────
-    # CLEANUP OLD TRACKS
-    # ────────────────────────────────────────────────────────────────────────
-
-    active_ids = {
-        track.track_id
-        for track in tracks
-        if track.is_confirmed()
-    }
-
-    for tid in list(prev_positions.keys()):
-        if tid not in active_ids:
-            prev_positions.pop(tid, None)
-
-    for tid in list(risk_history.keys()):
-        if tid not in active_ids:
-            risk_history.pop(tid, None)
-
-    return frame, detections_info, any_red
-
-
-if __name__ == "__main__":
-
-    cap = cv2.VideoCapture(0)
-
-    while True:
-
-        ret, frame = cap.read()
-
-        if not ret:
-            break
-
-        processed_frame, detections, any_red = process_frame(frame)
-
-        cv2.imshow("CampusGuard Detector Test", processed_frame)
-
-        if cv2.waitKey(1) == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
+    return frame, detections_info, any(d['score'] >= 75 for d in detections_info)
