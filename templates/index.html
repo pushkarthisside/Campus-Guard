@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CampusGuard | Command Center</title>
+  <style>
+    :root {
+      --accent-green: #00ff88;
+      --accent-yellow: #facc15;
+      --accent-red: #ff2244;
+      --bg-dark: #0a0a0f;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: var(--bg-dark);
+      overflow: hidden;
+      color: #fff;
+    }
+
+    /* Subtle Scanline Effect */
+    body::before {
+      content: " ";
+      display: block;
+      position: absolute;
+      top: 0; left: 0; bottom: 0; right: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), 
+                  linear-gradient(90deg, rgba(255, 0, 0, 0.02), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.02));
+      z-index: 2;
+      background-size: 100% 2px, 3px 100%;
+      pointer-events: none;
+    }
+
+    .root {
+      position: relative;
+      width: 100%; height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Courier New', monospace;
+      z-index: 5;
+    }
+
+    canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      opacity: 0.6;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(circle, transparent 40%, rgba(0,0,0,0.8) 100%);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 32px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: rgba(255,255,255,0.4);
+      z-index: 10;
+      background: rgba(10, 10, 15, 0.5);
+      backdrop-filter: blur(4px);
+    }
+
+    .pulse {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      margin-right: 10px;
+      box-shadow: 0 0 10px var(--accent-green);
+      animation: blink 2s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(0.8); }
+    }
+
+    .content {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      text-align: center;
+      max-width: 600px;
+    }
+
+    .eyebrow {
+      font-size: 10px;
+      letter-spacing: 5px;
+      color: var(--accent-green);
+      text-transform: uppercase;
+      border: 1px solid rgba(0, 255, 136, 0.2);
+      padding: 6px 16px;
+      background: rgba(0, 255, 136, 0.05);
+    }
+
+    h1 {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: clamp(48px, 10vw, 84px);
+      font-weight: 700;
+      letter-spacing: -2px;
+      line-height: 0.9;
+    }
+
+    h1 span { color: rgba(255,255,255,0.2); font-weight: 300; }
+
+    .desc {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      color: rgba(255,255,255,0.4);
+      max-width: 420px;
+      line-height: 1.6;
+    }
+
+    .btn {
+      margin-top: 10px;
+      padding: 16px 48px;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      color: #000;
+      background: #fff;
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      font-weight: bold;
+      transition: all 0.3s cubic-bezier(0.19, 1, 0.22, 1);
+      box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+    }
+
+    .btn:hover {
+      background: var(--accent-green);
+      transform: translateY(-2px);
+      box-shadow: 0 0 30px rgba(0, 255, 136, 0.3);
+    }
+
+    .status-row {
+      margin-top: 20px;
+      display: flex;
+      gap: 32px;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 9px;
+      letter-spacing: 2px;
+      color: rgba(255,255,255,0.3);
+    }
+
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+    }
+
+    /* Live Data Feed in Corner */
+    #data-stream {
+      position: fixed;
+      bottom: 20px; left: 20px;
+      font-size: 8px;
+      color: rgba(255,255,255,0.15);
+      text-align: left;
+      line-height: 1.5;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="cvs"></canvas>
+  <div class="vignette"></div>
+
+  <div class="root">
+    <div class="top-bar">
+      <div><span class="pulse"></span>CORE_SYSTEM_ACTIVE</div>
+      <div id="clk">--:--:--</div>
+      <div>UPLINK: STABLE · CAM-01</div>
+    </div>
+
+    <div class="content">
+      <div class="eyebrow">neural surveillance · p.v2</div>
+      <h1>Campus<span>Guard</span></h1>
+      <p class="desc">Real-time neural threat detection and behavioral analysis. Locally processed. Zero latency.</p>
+      <a href="/dashboard" class="btn">Initialize Surveillance</a>
+      
+      <div class="status-row">
+        <div class="status-item"><div class="dot" style="background:var(--accent-green); box-shadow: 0 0 8px var(--accent-green);"></div>SECURE</div>
+        <div class="status-item"><div class="dot" style="background:var(--accent-yellow); box-shadow: 0 0 8px var(--accent-yellow);"></div>CAUTION</div>
+        <div class="status-item"><div class="dot" style="background:var(--accent-red); box-shadow: 0 0 8px var(--accent-red);"></div>BREACH</div>
+      </div>
+    </div>
+
+    <div id="data-stream"></div>
+  </div>
+
+  <script>
+    const cvs = document.getElementById('cvs');
+    const ctx = cvs.getContext('2d');
+    const stream = document.getElementById('data-stream');
+    let W, H, pts = [], raf;
+    const N = 85, R = 150, SPD = 0.4;
+    let mouse = { x: -1000, y: -1000 };
+
+    function resize() {
+      W = cvs.width  = window.innerWidth;
+      H = cvs.height = window.innerHeight;
+    }
+
+    function init() {
+      resize();
+      pts = Array.from({ length: N }, () => ({
+        x:  Math.random() * W,
+        y:  Math.random() * H,
+        vx: (Math.random() - 0.5) * SPD,
+        vy: (Math.random() - 0.5) * SPD,
+        r:  Math.random() * 1.5 + 0.5,
+        baseX: 0, baseY: 0
+      }));
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+
+      for (let i = 0; i < N; i++) {
+        const a = pts[i];
+        
+        // Mouse avoidance logic
+        let dx_mouse = a.x - mouse.x;
+        let dy_mouse = a.y - mouse.y;
+        let dist_mouse = Math.sqrt(dx_mouse * dx_mouse + dy_mouse * dy_mouse);
+        if (dist_mouse < 100) {
+            a.x += dx_mouse * 0.05;
+            a.y += dy_mouse * 0.05;
+        }
+
+        a.x += a.vx; a.y += a.vy;
+        if (a.x < 0 || a.x > W) a.vx *= -1;
+        if (a.y < 0 || a.y > H) a.vy *= -1;
+
+        for (let j = i + 1; j < N; j++) {
+          const b = pts[j];
+          const dx = a.x - b.x, dy = a.y - b.y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < R) {
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.strokeStyle = `rgba(255,255,255,${(1 - d / R) * 0.12})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+          }
+        }
+        
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.fill();
+      }
+
+      raf = requestAnimationFrame(draw);
+    }
+
+    window.addEventListener('mousemove', (e) => {
+        mouse.x = e.clientX;
+        mouse.y = e.clientY;
+    });
+
+    init();
+    draw();
+    window.addEventListener('resize', () => { cancelAnimationFrame(raf); init(); draw(); });
+
+    // Clock
+    function tick() {
+      const n = new Date();
+      document.getElementById('clk').textContent = n.toTimeString().slice(0, 8);
+      
+      // Random Hex Stream
+      const hex = Math.random().toString(16).toUpperCase().slice(2, 10);
+      const lines = stream.innerHTML.split('<br>').slice(-4);
+      lines.push(`0x${hex} -> PKT_RECV -> OK`);
+      stream.innerHTML = lines.join('<br>');
+    }
+    tick();
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>

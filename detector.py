@@ -4,6 +4,13 @@ import numpy as np
 import time
 from ultralytics import YOLO
 import mediapipe as mp
+
+# THIS IS THE FIX: Bypass the .solutions attribute entirely
+try:
+    import mediapipe.python.solutions.pose as mp_pose
+except Exception:
+    mp_pose = None
+
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -19,14 +26,17 @@ yolo_model = YOLO("yolov8n.pt")
 # MEDIAPIPE POSE
 # ─────────────────────────────────────────────────────────────────────────────
 
-mp_pose = mp.solutions.pose
-
-pose_engine = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=0,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
+pose_engine = None
+if mp_pose is not None:
+    try:
+        pose_engine = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=0,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+    except Exception:
+        pose_engine = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEEPSORT TRACKER
@@ -93,7 +103,7 @@ def get_pose_for_person(frame, x1, y1, x2, y2):
 
     crop = frame[y1:y2, x1:x2]
 
-    if crop.size == 0:
+    if crop.size == 0 or pose_engine is None:
         return None
 
     try:
@@ -116,13 +126,6 @@ def check_for_weapons(frame, bbox):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RISK COMPUTATION
-#
-# FIX: Added `update_pos` parameter (default True).
-#   - prev_positions is only written when update_pos=True.
-#   - Call with update_pos=False for the "gating" probe so the position
-#     isn't consumed before the real scored call, which eliminates the
-#     double-call displacement bug where displacement was always 0 on the
-#     second invocation.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_risk(track_id, bbox, all_bboxes, pose_landmarks, frame_shape, update_pos=True):
@@ -152,13 +155,9 @@ def compute_risk(track_id, bbox, all_bboxes, pose_landmarks, frame_shape, update
         if displacement > 3:
             score += 10
 
-        # Running
         if displacement > 15:
             score += 20
 
-    # FIX: Only update the stored position when this is the authoritative call.
-    # The gating probe passes update_pos=False, so the position is preserved
-    # for the final scored call which passes update_pos=True (the default).
     if update_pos:
         prev_positions[track_id] = (cx, cy)
 
@@ -188,23 +187,21 @@ def compute_risk(track_id, bbox, all_bboxes, pose_landmarks, frame_shape, update
         try:
             lm = pose_landmarks.landmark
 
-            left_wrist = lm[mp_pose.PoseLandmark.LEFT_WRIST]
+            left_wrist  = lm[mp_pose.PoseLandmark.LEFT_WRIST]
             right_wrist = lm[mp_pose.PoseLandmark.RIGHT_WRIST]
 
-            left_shoulder = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
+            left_shoulder  = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
             right_shoulder = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER]
 
             nose = lm[mp_pose.PoseLandmark.NOSE]
 
-            left_arm_raised = left_wrist.y < left_shoulder.y
+            left_arm_raised  = left_wrist.y  < left_shoulder.y
             right_arm_raised = right_wrist.y < right_shoulder.y
 
             if left_arm_raised or right_arm_raised:
                 score += 40
 
-            avg_shoulder_y = (
-                left_shoulder.y + right_shoulder.y
-            ) / 2
+            avg_shoulder_y = (left_shoulder.y + right_shoulder.y) / 2
 
             if nose.y > avg_shoulder_y + 0.1:
                 score += 15
@@ -299,59 +296,28 @@ def process_frame(frame):
         x1, y1, x2, y2 = track.to_ltrb()
         zone_name = get_zone_for_bbox(x1, y1, x2, y2)
 
-        # ────────────────────────────────────────────────────────────────────
-        # PERFORMANCE GATE
-        #
-        # FIX: Pass update_pos=False so prev_positions is NOT mutated here.
-        # The displacement calculated in the final scored call below will
-        # therefore use the correct previous-frame position, preserving
-        # accurate "Running" detection.
-        # ────────────────────────────────────────────────────────────────────
-
         base_score = compute_risk(
             track_id,
             [x1, y1, x2, y2],
             confirmed_bboxes,
             None,
             frame.shape,
-            update_pos=False       # <── FIX: don't consume the position yet
+            update_pos=False
         )
 
-        # Only run expensive pose inference if there is already some activity
         pose_lm = None
         if base_score >= 15:
-            pose_lm = get_pose_for_person(
-                frame,
-                x1,
-                y1,
-                x2,
-                y2
-            )
+            pose_lm = get_pose_for_person(frame, x1, y1, x2, y2)
 
-        # ────────────────────────────────────────────────────────────────────
-        # WEAPON PLACEHOLDER
-        # ────────────────────────────────────────────────────────────────────
-
-        is_weapon = check_for_weapons(
-            frame,
-            [x1, y1, x2, y2]
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # FINAL SCORE
-        #
-        # FIX: This is the single authoritative call — update_pos defaults to
-        # True, so prev_positions is written exactly once per track per frame.
-        # Displacement math is now correct for every frame.
-        # ────────────────────────────────────────────────────────────────────
+        is_weapon = check_for_weapons(frame, [x1, y1, x2, y2])
 
         raw_score = compute_risk(
             track_id,
             [x1, y1, x2, y2],
             confirmed_bboxes,
-            pose_lm,               # real pose landmarks (or None)
+            pose_lm,
             frame.shape,
-            update_pos=True        # <── FIX: write position exactly once
+            update_pos=True
         )
 
         if is_weapon:
@@ -362,15 +328,10 @@ def process_frame(frame):
         score = smooth_score(track_id, raw_score)
 
         color = score_to_color(score)
-
         label = score_to_label(score)
 
         if score >= 66:
             any_red = True
-
-        # ────────────────────────────────────────────────────────────────────
-        # DRAW BOX
-        # ────────────────────────────────────────────────────────────────────
 
         cv2.rectangle(
             frame,
@@ -380,12 +341,7 @@ def process_frame(frame):
             2
         )
 
-        # ────────────────────────────────────────────────────────────────────
-        # LABEL
-        # ────────────────────────────────────────────────────────────────────
-
-        tag = f"ID{track_id} | {score}% | {label}"
-
+        tag   = f"ID{track_id} | {score}% | {label}"
         tag_y = max(int(y1) - 10, 20)
 
         cv2.putText(
@@ -400,15 +356,10 @@ def process_frame(frame):
 
         detections_info.append({
             "track_id": int(track_id),
-            "zone": zone_name,
-            "score": score,
-            "label": label,
-            "bbox": [
-                int(x1),
-                int(y1),
-                int(x2),
-                int(y2)
-            ]
+            "zone":     zone_name,
+            "score":    score,
+            "label":    label,
+            "bbox":     [int(x1), int(y1), int(x2), int(y2)]
         })
 
     # ────────────────────────────────────────────────────────────────────────
@@ -431,6 +382,7 @@ def process_frame(frame):
 
     return frame, detections_info, any_red
 
+
 if __name__ == "__main__":
 
     cap = cv2.VideoCapture(0)
@@ -446,9 +398,7 @@ if __name__ == "__main__":
 
         cv2.imshow("CampusGuard Detector Test", processed_frame)
 
-        key = cv2.waitKey(1)
-
-        if key == ord("q"):
+        if cv2.waitKey(1) == ord("q"):
             break
 
     cap.release()

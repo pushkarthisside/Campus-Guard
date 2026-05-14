@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CampusGuard | Live Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --panel: #0f111a;
+            --accent: #00ff88;
+            --red: #ff2244;
+            --yellow: #ffcc00;
+            --text: rgba(255,255,255,0.8);
+        }
+
+        body {
+            margin: 0; padding: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', monospace;
+            display: flex; flex-direction: column; height: 100vh;
+            overflow: hidden;
+        }
+
+        /* ── Top Header ── */
+        header {
+            padding: 15px 25px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex; justify-content: space-between; align-items: center;
+            background: var(--panel);
+        }
+
+        .status-pill {
+            padding: 4px 12px; border-radius: 20px; font-size: 10px;
+            background: rgba(0,255,136,0.1); color: var(--accent);
+            border: 1px solid var(--accent);
+        }
+
+        /* ── Main Layout ── */
+        .main-container {
+            display: flex; flex: 1; position: relative; overflow: hidden;
+        }
+
+        #webcam-container {
+            flex: 1; display: flex; align-items: center; justify-content: center;
+            background: #000; position: relative; transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
+        }
+
+        #webcam-feed {
+            max-width: 100%; max-height: 100%;
+            border: 2px solid rgba(255,255,255,0.05);
+        }
+
+        /* ── Alert Sidebar (Hidden by default) ── */
+        #sos-sidebar {
+            width: 0; background: var(--red); color: white;
+            transition: all 0.4s ease; overflow: hidden;
+            display: flex; flex-direction: column; padding: 0;
+        }
+
+        #sos-sidebar.active {
+            width: 350px; padding: 30px 20px;
+        }
+
+        .sos-header { font-size: 24px; font-weight: bold; margin-bottom: 20px; border-bottom: 2px solid white; }
+        .sos-item { margin-bottom: 15px; font-size: 14px; }
+        .sos-label { font-size: 10px; opacity: 0.8; text-transform: uppercase; }
+
+        /* ── Bottom Threat Log ── */
+        footer {
+            height: 200px; background: var(--panel);
+            border-top: 1px solid rgba(255,255,255,0.05);
+            padding: 15px; display: flex; flex-direction: column;
+        }
+
+        .log-header { font-size: 12px; margin-bottom: 10px; color: var(--accent); letter-spacing: 2px; }
+        #threat-log {
+            flex: 1; overflow-y: auto; font-size: 11px; line-height: 1.6;
+        }
+
+        .log-entry { display: flex; gap: 20px; border-bottom: 1px solid rgba(255,255,255,0.02); padding: 4px 0; }
+        .time { color: rgba(255,255,255,0.3); }
+        .red-alert { color: var(--red); font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div style="display:flex; align-items:center; gap:15px;">
+            <span style="font-weight:bold; letter-spacing:2px;">CAMPUSGUARD <span style="opacity:0.3;">v2.1</span></span>
+            <div class="status-pill">LIVE FEED: CAM-01</div>
+        </div>
+        <div id="clock">00:00:00</div>
+        <button onclick="toggleCamera()" id="camBtn" style="background:transparent; border:1px solid white; color:white; padding:5px 15px; cursor:pointer; font-family:inherit;">START SYSTEM</button>
+    </header>
+
+    <div class="main-container">
+        <div id="webcam-container">
+            <img id="webcam-feed" src="" alt="Webcam Feed Disconnected">
+            <div id="no-signal" style="position:absolute; color:rgba(255,255,255,0.2);">AWAITING SIGNAL...</div>
+        </div>
+
+        <div id="sos-sidebar">
+            <div class="sos-header">🚨 SOS TRIGGERED</div>
+            <div class="sos-item">
+                <div class="sos-label">Threat Level</div>
+                <div id="sos-threat" style="font-size:20px;">-</div>
+            </div>
+            <div class="sos-item">
+                <div class="sos-label">Zone Location</div>
+                <div id="sos-zone" style="font-size:18px;">-</div>
+            </div>
+            <div class="sos-item">
+                <div class="sos-label">Incident ID</div>
+                <div id="sos-id">-</div>
+            </div>
+            <div style="margin-top:auto; font-size:10px; opacity:0.7; line-height:1.4;">
+                NOTIFYING CAMPUS SECURITY... ✓<br>
+                UPLINKING TO ADMIN... ✓<br>
+                RECORDING INCIDENT... ✓
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <div class="log-header">SYSTEM_THREAT_LOG</div>
+        <div id="threat-log">
+            <!-- New log entries appear here -->
+        </div>
+    </footer>
+
+    <script>
+        const socket = io();
+        let camActive = false;
+
+        function toggleCamera() {
+            if (!camActive) {
+                socket.emit('start_camera');
+                document.getElementById('camBtn').innerText = "STOP SYSTEM";
+                document.getElementById('no-signal').style.display = 'none';
+            } else {
+                socket.emit('stop_camera');
+                document.getElementById('camBtn').innerText = "START SYSTEM";
+                document.getElementById('no-signal').style.display = 'block';
+                document.getElementById('webcam-feed').src = "";
+            }
+            camActive = !camActive;
+        }
+
+        socket.on('frame_update', (data) => {
+            // 1. Update the image
+            document.getElementById('webcam-feed').src = "data:image/jpeg;base64," + data.frame;
+
+            // 2. Handle SOS Sidebar
+            const sidebar = document.getElementById('sos-sidebar');
+            if (data.sos_active) {
+                sidebar.classList.add('active');
+                document.getElementById('sos-threat').innerText = data.sos_data.threat;
+                document.getElementById('sos-zone').innerText = data.sos_data.zone;
+                document.getElementById('sos-id').innerText = "#TRK_" + data.sos_data.track_id;
+            } else {
+                sidebar.classList.remove('active');
+            }
+
+            // 3. Update Threat Log
+            if (data.new_log) {
+                const log = document.getElementById('threat-log');
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                entry.innerHTML = `
+                    <span class="time">[${data.new_log.time}]</span>
+                    <span class="zone">${data.new_log.zone}</span>
+                    <span class="${data.new_log.score >= 66 ? 'red-alert' : ''}">${data.new_log.threat} (ID:${data.new_log.track_id})</span>
+                    <span style="margin-left:auto; opacity:0.5;">RISK: ${data.new_log.score}%</span>
+                `;
+                log.prepend(entry); // Newest at top
+            }
+        });
+
+        // Simple Clock
+        setInterval(() => {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString();
+        }, 1000);
+    </script>
+</body>
+</html>
